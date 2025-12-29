@@ -1,0 +1,21 @@
+{
+    "BackupSets": [
+        {
+            "Name": "Test",
+            "Encryption": {
+                "Enabled": false
+            },
+            "Source": {
+                "Path": "TODO",
+                "ExcludePaths": []
+            },
+            "Destinations": [
+                {
+                    "LocalFileSystem": {
+                        "Path": "TODO"
+                    }
+                }
+            ]
+        }
+    ]
+}
