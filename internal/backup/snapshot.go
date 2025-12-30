@@ -30,28 +30,28 @@ type snapshotter struct {
 type snapshotContext struct {
 	relPath           string
 	dest              destination.Interface
-	snapshot          *snapshot
-	previousSnapshot  *snapshot
-	existingBlobIDs   map[blobID]blobLen
-	referencedBlobIDs map[blobID]blobLen
-	uploadedBlobIDs   map[blobID]blobLen
+	snapshot          *Snapshot
+	previousSnapshot  *Snapshot
+	existingBlobIDs   map[BlobID]blobLen
+	referencedBlobIDs map[BlobID]blobLen
+	uploadedBlobIDs   map[BlobID]blobLen
 }
 
-type snapshot struct {
+type Snapshot struct {
 	CreatedAt time.Time
-	Files     map[string]fileSnapshot
+	Files     map[string]FileSnapshot
 	TotalSize uint64
 }
 
-type fileSnapshot struct {
+type FileSnapshot struct {
 	Path         string
 	LastModified time.Time
 	Size         uint64
-	Blobs        []blobID
+	Blobs        []BlobID
 }
 
 type blob struct {
-	ID      blobID
+	ID      BlobID
 	Content []byte
 }
 
@@ -74,12 +74,12 @@ func NewSnapshotter(backupSet *BackupSet) (Snapshotter, error) {
 }
 
 func (snapshotter *snapshotter) TakeSnapshot() error {
-	dest, err := destination.NewLocalDir(snapshotter.backupSet.conf.Destinations[0].LocalFileSystem)
+	dest, err := snapshotter.backupSet.OpenDestination()
 	if err != nil {
-		return fmt.Errorf("init local dir destination: %w", err)
+		return fmt.Errorf("init destination: %w", err)
 	}
 
-	snapshot := &snapshot{
+	snapshot := &Snapshot{
 		CreatedAt: time.Now(),
 	}
 
@@ -93,8 +93,8 @@ func (snapshotter *snapshotter) TakeSnapshot() error {
 		dest:              dest,
 		snapshot:          snapshot,
 		existingBlobIDs:   existingBlobs,
-		referencedBlobIDs: make(map[blobID]blobLen),
-		uploadedBlobIDs:   make(map[blobID]blobLen),
+		referencedBlobIDs: make(map[BlobID]blobLen),
+		uploadedBlobIDs:   make(map[BlobID]blobLen),
 	}
 
 	previousSnapshot, err := GetLatestSnapshot(ctx)
@@ -147,7 +147,7 @@ func (snapshotter *snapshotter) TakeSnapshot() error {
 }
 
 func (snapshotter *snapshotter) gatherFiles(ctx *snapshotContext) error {
-	ctx.snapshot.Files = make(map[string]fileSnapshot)
+	ctx.snapshot.Files = make(map[string]FileSnapshot)
 	return filepath.Walk(snapshotter.backupSet.conf.Source.Path, func(path string, fi fs.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -158,7 +158,7 @@ func (snapshotter *snapshotter) gatherFiles(ctx *snapshotContext) error {
 		if !fi.IsDir() {
 			//TODO skip files
 			relPath := strings.ReplaceAll(strings.TrimLeft(path[len(snapshotter.backupSet.conf.Source.Path):], "/\\"), "\\", "/")
-			ctx.snapshot.Files[relPath] = fileSnapshot{
+			ctx.snapshot.Files[relPath] = FileSnapshot{
 				Path:         relPath,
 				LastModified: fi.ModTime(),
 				Size:         uint64(fi.Size()),
@@ -184,7 +184,7 @@ func (snapshotter *snapshotter) uploadBlobsOfFile(ctx *snapshotContext, relPath 
 	if ctx.previousSnapshot != nil {
 		if previousFile, ok := ctx.previousSnapshot.Files[relPath]; ok {
 			if previousFile.LastModified.UnixMilli() == file.LastModified.UnixMilli() {
-				file.Blobs = make([]blobID, 0, len(previousFile.Blobs))
+				file.Blobs = make([]BlobID, 0, len(previousFile.Blobs))
 				for _, blobID := range previousFile.Blobs {
 					file.Blobs = append(file.Blobs, blobID)
 					if blobLen, ok := ctx.existingBlobIDs[blobID]; ok {
@@ -208,7 +208,7 @@ func (snapshotter *snapshotter) uploadBlobsOfFile(ctx *snapshotContext, relPath 
 		return err
 	}
 
-	file.Blobs = make([]blobID, 0, file.Size/blobSize+1)
+	file.Blobs = make([]BlobID, 0, file.Size/blobSize+1)
 	for i := uint64(0); i < file.Size; i += blobSize {
 		remainingSize := file.Size - i
 		readLen := min(blobSize, remainingSize)
@@ -242,10 +242,19 @@ func (snapshotter *snapshotter) prepareBlob(_ *snapshotContext, content []byte) 
 	}, nil
 }
 
+func (snapshot *Snapshot) GetBlobDir(id BlobID) string {
+	blobIDStr := id.String()
+	return ".blobs/" + blobIDStr[0:2] + "/" + blobIDStr[2:4] + "/" + blobIDStr[4:6] + "/" + blobIDStr[6:8]
+}
+
+func (snapshot *Snapshot) GetBlobPath(id BlobID) string {
+	blobIDStr := id.String()
+	return snapshot.GetBlobDir(id) + "/" + blobIDStr[8:]
+}
+
 func (snapshotter *snapshotter) WriteBlob(ctx *snapshotContext, blob *blob) error {
-	blobIDStr := blob.ID.String()
-	blobDir := ".blobs/" + blobIDStr[0:2] + "/" + blobIDStr[2:4] + "/" + blobIDStr[4:6] + "/" + blobIDStr[6:8]
-	blobPath := blobDir + "/" + blobIDStr[8:]
+	blobDir := ctx.previousSnapshot.GetBlobDir(blob.ID)
+	blobPath := ctx.snapshot.GetBlobPath(blob.ID)
 	if err := ctx.dest.CreateDir(blobDir); err != nil {
 		return err
 	}
@@ -266,7 +275,7 @@ func (snapshotter *snapshotter) UpdateBlobIndex(ctx *snapshotContext) error {
 	return snapshotter.backupSet.WriteBlobIndex(ctx.dest, blobs)
 }
 
-func (snapshot *snapshot) WriteIndex(ctx *snapshotContext) error {
+func (snapshot *Snapshot) WriteIndex(ctx *snapshotContext) error {
 	w := bytes.NewBuffer(nil)
 
 	// version
@@ -306,7 +315,7 @@ func (snapshot *snapshot) WriteIndex(ctx *snapshotContext) error {
 	return ctx.dest.WriteFile(snapshot.CreatedAt.UTC().Format("20060102T150405Z/.snapshot"), w.Bytes())
 }
 
-func ReadSnapshotIndex(ctx *snapshotContext, path string) (*snapshot, error) {
+func ReadSnapshotIndex(ctx *snapshotContext, path string) (*Snapshot, error) {
 	data, err := ctx.dest.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -322,7 +331,7 @@ func ReadSnapshotIndex(ctx *snapshotContext, path string) (*snapshot, error) {
 		return nil, fmt.Errorf("unsupported snapshot version %d", version)
 	}
 
-	snapshot := &snapshot{}
+	snapshot := &Snapshot{}
 
 	var createdAt uint64
 	if err := binary.Read(r, binary.LittleEndian, &createdAt); err != nil {
@@ -338,9 +347,9 @@ func ReadSnapshotIndex(ctx *snapshotContext, path string) (*snapshot, error) {
 	if err := binary.Read(r, binary.LittleEndian, &fileCount); err != nil {
 		return nil, err
 	}
-	snapshot.Files = make(map[string]fileSnapshot, fileCount)
+	snapshot.Files = make(map[string]FileSnapshot, fileCount)
 	for range fileCount {
-		var file fileSnapshot
+		var file FileSnapshot
 
 		path, err := readStr(r)
 		if err != nil {
@@ -362,9 +371,9 @@ func ReadSnapshotIndex(ctx *snapshotContext, path string) (*snapshot, error) {
 		if err := binary.Read(r, binary.LittleEndian, &blobCount); err != nil {
 			return nil, err
 		}
-		file.Blobs = make([]blobID, 0, blobCount)
+		file.Blobs = make([]BlobID, 0, blobCount)
 		for range blobCount {
-			var blobID blobID
+			var blobID BlobID
 			if err := binary.Read(r, binary.LittleEndian, &blobID); err != nil {
 				return nil, err
 			}
@@ -377,12 +386,12 @@ func ReadSnapshotIndex(ctx *snapshotContext, path string) (*snapshot, error) {
 	return snapshot, nil
 }
 
-func ListSnapshots(ctx *snapshotContext) ([]*snapshot, error) {
+func ListSnapshots(ctx *snapshotContext) ([]*Snapshot, error) {
 	files, err := ctx.dest.ReadDir("")
 	if err != nil {
 		return nil, err
 	}
-	snapshots := make([]*snapshot, 0)
+	snapshots := make([]*Snapshot, 0)
 	for _, fi := range files {
 		if fi.IsDir {
 			_, err := time.Parse("20060102T150405Z", fi.Name)
@@ -403,13 +412,13 @@ func ListSnapshots(ctx *snapshotContext) ([]*snapshot, error) {
 	return snapshots, nil
 }
 
-func GetLatestSnapshot(ctx *snapshotContext) (*snapshot, error) {
+func GetLatestSnapshot(ctx *snapshotContext) (*Snapshot, error) {
 	snapshots, err := ListSnapshots(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	var latestSnapshot *snapshot
+	var latestSnapshot *Snapshot
 	for _, snapshot := range snapshots {
 		if latestSnapshot == nil || snapshot.CreatedAt.After(latestSnapshot.CreatedAt) {
 			latestSnapshot = snapshot

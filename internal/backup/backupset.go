@@ -41,6 +41,14 @@ func NewBackupSetFromConfig(conf BackupSetConfig) (*BackupSet, error) {
 	return &BackupSet{conf: conf}, nil
 }
 
+func (backupSet *BackupSet) OpenDestination() (destination.Interface, error) {
+	dest, err := destination.NewLocalDir(backupSet.conf.Destinations[0].LocalFileSystem)
+	if err != nil {
+		return nil, fmt.Errorf("init local dir destination: %w", err)
+	}
+	return dest, nil
+}
+
 /*func (backupSet *BackupSet) SetPassword(password string) {
 	backupSet.conf.PasswordSalt = make([]byte, 64)
 	if _, err := rand.Read(backupSet.conf.PasswordSalt); err != nil {
@@ -60,19 +68,19 @@ func (backupSet *BackupSet) computeHash(password string) [32]byte {
 	return [32]byte(hasher.Sum(nil))
 }*/
 
-type blobID [32]byte
+type BlobID [32]byte
 
-func (id blobID) String() string {
+func (id BlobID) String() string {
 	return fmt.Sprintf("%x", [32]byte(id))
 }
 
 type blobLen uint32
 
-func (backupSet *BackupSet) ReadBlobIndex(dest destination.Interface) (map[blobID]blobLen, error) {
+func (backupSet *BackupSet) ReadBlobIndex(dest destination.Interface) (map[BlobID]blobLen, error) {
 	data, err := dest.ReadFile(".blob-index")
 	if err != nil {
 		if dest.IsNotExists(err) {
-			return make(map[blobID]blobLen), nil
+			return make(map[BlobID]blobLen), nil
 		}
 		return nil, err
 	}
@@ -88,9 +96,9 @@ func (backupSet *BackupSet) ReadBlobIndex(dest destination.Interface) (map[blobI
 		return nil, err
 	}
 
-	blobs := make(map[blobID]blobLen, blobCount)
+	blobs := make(map[BlobID]blobLen, blobCount)
 	for range blobCount {
-		var blobID blobID
+		var blobID BlobID
 		if err := binary.Read(r, binary.LittleEndian, &blobID); err != nil {
 			return nil, err
 		}
@@ -104,7 +112,7 @@ func (backupSet *BackupSet) ReadBlobIndex(dest destination.Interface) (map[blobI
 	return blobs, nil
 }
 
-func (backupSet *BackupSet) WriteBlobIndex(dest destination.Interface, blobs map[blobID]blobLen) error {
+func (backupSet *BackupSet) WriteBlobIndex(dest destination.Interface, blobs map[BlobID]blobLen) error {
 	w := bytes.NewBuffer(nil)
 
 	// version
@@ -125,4 +133,12 @@ func (backupSet *BackupSet) WriteBlobIndex(dest destination.Interface, blobs map
 	}
 
 	return dest.WriteFile(".blob-index", w.Bytes())
+}
+
+func (backupSet *BackupSet) ListSnapshots() ([]*Snapshot, error) {
+	dest, err := backupSet.OpenDestination()
+	if err != nil {
+		return nil, err
+	}
+	return ListSnapshots(&snapshotContext{dest: dest})
 }
